@@ -424,7 +424,7 @@ class NonWeakNormalizableException(Exception):
     pass
 
 
-def normalize(term: Term, verbose=False, separate_lines=True) -> Term:
+def normalize(term: Term, verbose=False, separate_lines=True, print_step_count=False) -> Term:
     def my_print(*args, **kwargs):
         if verbose:
             print(*args, **kwargs)
@@ -433,7 +433,10 @@ def normalize(term: Term, verbose=False, separate_lines=True) -> Term:
 
     seen_terms: Set[str] = set()
 
+    step_count = 0
+
     while not term.is_normal():
+        step_count += 1
         canonical_term = str(term.canonize_distinct())
         if canonical_term in seen_terms:
             my_print("-> Loop!")
@@ -444,6 +447,10 @@ def normalize(term: Term, verbose=False, separate_lines=True) -> Term:
             my_print("")
         my_print(" ->", term, end='')
     my_print()
+
+    if print_step_count:
+        print("step_count =", step_count)
+
     return term
 
 
