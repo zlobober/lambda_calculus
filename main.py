@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 from dataclasses import dataclass
 
@@ -23,6 +25,10 @@ class Var:
     def __hash__(self):
         return hash(self.index)
 
+    @staticmethod
+    def from_str(s: str) -> 'Var':
+        assert s[0] == 'z'
+        return Var(int(s[1:]))
 
 class VarSet:
     var_set: Set[Var]
@@ -58,11 +64,15 @@ class Term:
     right: Optional['Term'] = None
 
     @staticmethod
-    def new_var(var: Var):
+    def new_var(var: Var | str):
+        if type(var) is str:
+            var = Var.from_str(var)
         return Term("var", var=var)
 
     @staticmethod
-    def new_abs(var: Var, right: 'Term'):
+    def new_abs(var: Var | str, right: 'Term'):
+        if type(var) is str:
+            var = Var.from_str(var)
         return Term("abs", var=var, right=right)
 
     @staticmethod
@@ -310,6 +320,35 @@ class Term:
 
         return traverse(self)
 
+    def __eq__(self, other: 'Term'):
+        return str(self.canonize_distinct()) == str(other.canonize_distinct())
+
+    def __ne__(self, other: 'Term'):
+        return not (self == other)
+
+    def __call__(self, *args: 'Term') -> 'Term':
+        """
+        Syntactic sugar for application. Returns self(*args) a-la currying.
+        """
+        result = self
+        for arg in args:
+            result = Term.new_app(left=result, right=arg)
+        return result
+
+    def abstract(self, *vars: Var | str | Term) -> 'Term':
+        """
+        Syntactic sugar for abstraction. Returns λ(vars).self
+        """
+        result = self
+        for var in reversed(vars):
+            if type(var) is str:
+                var = Var.from_str(var)
+            elif type(var) is Term:
+                assert var.kind == "var"
+                var = var.var
+            result = Term.new_abs(var=var, right=result)
+        return result
+
 
 def reduce_redex(root: Term) -> Term:
     assert root.is_redex()
@@ -385,7 +424,7 @@ class NonWeakNormalizableException(Exception):
     pass
 
 
-def normalize(term: Term, verbose=False) -> Term:
+def normalize(term: Term, verbose=False, separate_lines=True) -> Term:
     def my_print(*args, **kwargs):
         if verbose:
             print(*args, **kwargs)
@@ -401,6 +440,8 @@ def normalize(term: Term, verbose=False) -> Term:
             raise NonWeakNormalizableException()
         seen_terms.add(canonical_term)
         term = reduce_normal(term)
+        if separate_lines:
+            my_print("")
         my_print(" ->", term, end='')
     my_print()
     return term
