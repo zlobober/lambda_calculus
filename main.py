@@ -1,7 +1,7 @@
 import copy
 from dataclasses import dataclass
 
-from typing import Optional, Set, Dict
+from typing import Optional, Set, Dict, Callable, List
 
 
 LAMBDA = "λ"
@@ -44,6 +44,7 @@ class VarSet:
 
     def update(self, var_set: 'VarSet'):
         self.var_set.update(var_set.var_set)
+
 
 @dataclass
 class Term:
@@ -243,6 +244,72 @@ class Term:
         else:
             assert False
 
+    def weight(self):
+        if self.kind == "var":
+            return 1
+        elif self.kind == "app":
+            return 1 + self.left.weight() + self.right.weight()
+        elif self.kind == "abs":
+            return 1 + self.right.weight()
+        else:
+            assert False
+
+    def collect_redexes(self) -> List['Term']:
+        redexes = []
+
+        def traverse(term):
+            if term.is_redex():
+                redexes.append(term)
+            if term.kind == "var":
+                return
+            elif term.kind == "app":
+                traverse(term.left)
+                traverse(term.right)
+            elif term.kind == "abs":
+                traverse(term.right)
+            else:
+                assert False
+
+        traverse(self)
+        return redexes
+
+    def canonize_distinct(self):
+        """
+        Renames variable such that all variables are distinct and the resulting term
+        is "lexicographically" smallest. Done in linear time.
+        """
+
+        next_index = 0
+
+        mapping: Dict[Var, Var] = dict()
+
+        def map(var: Var) -> Var:
+            if var not in mapping:
+                nonlocal next_index
+                mapping[var] = Var(next_index)
+                next_index += 1
+            return mapping[var]
+
+        def traverse(term):
+            if term.kind == "var":
+                return Term.new_var(map(term.var))
+            elif term.kind == "app":
+                left = traverse(term.left)
+                right = traverse(term.right)
+                return Term.new_app(left=left, right=right)
+            elif term.kind == "abs":
+                old = mapping.pop(term.var, None)
+                var = map(term.var)
+                right = traverse(term.right)
+                result = Term.new_abs(var=var, right=right)
+                if old is not None:
+                    mapping[term.var] = old
+                return result
+            else:
+                assert False
+
+        return traverse(self)
+
 
 def reduce_redex(root: Term) -> Term:
     assert root.is_redex()
@@ -275,9 +342,14 @@ def reduce_redex(root: Term) -> Term:
     return traverse(where)
 
 
-def reduce_normal(term: Term) -> Term:
+def reduce_generic(term: Term, redex_picker: Callable[[Term], bool]):
+    """
+    Traverses term seeking for a first subterm, for which redex_picker returns True, and then reduces that subterm.
+    redex_picker must return True for at least one subterm.
+    """
+
     def traverse(term) -> (Term, bool):
-        if term.is_redex():
+        if redex_picker(term):
             return reduce_redex(term), True
         elif term.kind == 'var':
             return term, False
@@ -299,16 +371,86 @@ def reduce_normal(term: Term) -> Term:
     return result
 
 
-def normalize(term: Term, verbose=True) -> Term:
-    if verbose:
-        print(term, end='')
-    while not term.is_normal():
-        term = reduce_normal(term)
+def reduce_normal(term: Term) -> Term:
+    return reduce_generic(term, lambda term: term.is_redex())
+
+
+def reduce_particular(term: Term, redex: Term) -> Term:
+    """Reduce particular redex of a term; redex must be somewhere in term"""
+
+    return reduce_generic(term, lambda term: term == redex)
+
+
+class NonWeakNormalizableException(Exception):
+    pass
+
+
+def normalize(term: Term, verbose=False) -> Term:
+    def my_print(*args, **kwargs):
         if verbose:
-            print(" ->", term, end='')
-    if verbose:
-        print()
+            print(*args, **kwargs)
+
+    my_print(term, end='')
+
+    seen_terms: Set[str] = set()
+
+    while not term.is_normal():
+        canonical_term = str(term.canonize_distinct())
+        if canonical_term in seen_terms:
+            my_print("-> Loop!")
+            raise NonWeakNormalizableException()
+        seen_terms.add(canonical_term)
+        term = reduce_normal(term)
+        my_print(" ->", term, end='')
+    my_print()
     return term
+
+
+class NonStrongNormalizableException(Exception):
+    pass
+
+
+class UncertainStrongNormalizabilityException(Exception):
+    pass
+
+
+def check_strong_normalizability(term: Term, depth=0, depth_limit=20, weight_limit=300,
+                                 seen_canonical_terms: Set[str]=None, verbose=False):
+    if depth == depth_limit:
+        raise UncertainStrongNormalizabilityException(f"Depth limit exceeded at term {term}")
+    if term.weight() >= weight_limit:
+        raise UncertainStrongNormalizabilityException(f"Weight limit exceeded at term {term}")
+
+    if seen_canonical_terms is None:
+        seen_canonical_terms = set()
+
+    def my_print(*args):
+        if not verbose:
+            return
+        print(" " * (2 * depth), end='')
+        print(*args)
+
+    if term.is_normal():
+        my_print(f"Normal: {term}")
+        return True
+
+    redexes = term.collect_redexes()
+
+    canonized_term_str = str(term.canonize_distinct())
+
+    if canonized_term_str in seen_canonical_terms:
+        my_print("Loop!")
+        raise NonStrongNormalizableException()
+
+    seen_canonical_terms.add(canonized_term_str)
+
+    for redex in redexes:
+        reduced_term = reduce_particular(term, redex)
+        my_print(term, "->", reduced_term)
+        check_strong_normalizability(reduced_term, depth=depth+1, depth_limit=depth_limit, weight_limit=weight_limit,
+                                     verbose=verbose, seen_canonical_terms=seen_canonical_terms)
+
+    seen_canonical_terms.remove(canonized_term_str)
 
 
 if __name__ == "__main__":
@@ -373,3 +515,45 @@ if __name__ == "__main__":
 
     t13 = Term.parse(f"(λz0.z0z0z0){S}")
     normalize(t13, verbose=True)
+
+    print()
+
+    check_strong_normalizability(t13, verbose=True)
+
+    print()
+
+    t14 = Term.parse(f"(λz0.z0z0)((λz1.z1z1)z2)")
+    check_strong_normalizability(t14, verbose=True)
+
+    print()
+
+    t15 = Term.parse(f"(λz0.λz1.z1)((λz0.z0z0)(λz0.z0z0))")
+    normalize(t15, verbose=True)
+
+    print()
+
+    try:
+        check_strong_normalizability(t15, verbose=True)
+    except NonStrongNormalizableException:
+        print("Non-strong normalizable")
+
+    print()
+
+    print(t15.canonize_distinct())
+
+    t16 = Term.parse(f"(λz0.z0z0)(λz0.z0z0)")
+    try:
+        normalize(t16, verbose=True)
+    except NonWeakNormalizableException:
+        print("Non-weak-normalizable!")
+    try:
+        check_strong_normalizability(t16, verbose=True)
+    except NonStrongNormalizableException:
+        print("Non-strong-normalizable!")
+
+    t17 = Term.parse(f"(λz0.z1(z0z0))(λz0.z1(z0z0))")
+
+    try:
+        check_strong_normalizability(t17, verbose=True)
+    except UncertainStrongNormalizabilityException:
+        print("Strong normalizability is uncertain")
